@@ -419,4 +419,5 @@ def random_lattice_polytope(n_vertices, dim):
     return Polyhedron(vertices)
 
 def express_as_linear_combination(P, f):
+    """Accepts"""
     
