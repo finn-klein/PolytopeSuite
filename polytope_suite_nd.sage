@@ -1,5 +1,6 @@
 import numpy as np
 import itertools
+from sage import all
 
 class ConewisePolynomial:
     """
@@ -417,4 +418,5 @@ def random_lattice_polytope(n_vertices, dim):
 
     return Polyhedron(vertices)
 
-def 
+def express_as_linear_combination(P, f):
+    
