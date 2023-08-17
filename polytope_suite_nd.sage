@@ -1,6 +1,4 @@
-import numpy as np
 import itertools
-from sage import all
 
 class ConewisePolynomial:
     """
@@ -24,6 +22,22 @@ class ConewisePolynomial:
         for i in self.fan.cones(self.fan.dim()):
             idx = self.fan.cones(self.fan.dim()).index(i)
             result.append(self.data[idx] * other.data[idx])
+        return ConewisePolynomial(fan=self.fan, data=result)
+
+    def __rmul__(self, other):
+        """
+        left-action of a globally defined polynomial by multiplication
+        """
+
+        result = [other * x for x in self.data]
+        return ConewisePolynomial(fan=self.fan, data=result)
+
+    def __sub__(self, other):
+        """
+        subtraction of conewise polynomials. returns self - other
+        """
+
+        result = [self.data[i] - other.data[i] for i in range(len(self.data))]
         return ConewisePolynomial(fan=self.fan, data=result)
 
     def __repr__(self):
@@ -124,7 +138,7 @@ def get_characteristic_function_of_ray(rho, Sigma, restrict_to=None):
     if restrict_to is not None:
         if restrict_to not in Sigma:
             raise ValueError("argument restrict_to is not a cone in Sigma.")
-        if restrict_to.dim() is not Sigma.dim():
+        if restrict_to.dim() != Sigma.dim():
             raise ValueError("dimension of argument restrict_to is not maximal.")
         idx = Sigma.cones(Sigma.dim()).index(restrict_to)
         return f[idx]
@@ -147,16 +161,21 @@ def get_characteristic_function_of_cone(sigma, Sigma, make_global=False):
     return f
         
 
-def get_basis_functions(P, deg=None, return_order=False):
+def get_basis_functions(P, deg=None, return_order=False, deterministic=False):
     """
     Accepts a polytope P.
     Returns a list of basis functions for the cohomology ring of the normal fan of P.
     If deg is not None but an integer, returns only the basis elements of degree deg.
     If return_order is True, return the shelling order as a list of indices.
+    If deterministic is True, set the random seed before attempting to find a generic hyperplane.
     """
 
-    # "Shelling order" on the vertices (Idea by Fleming-Karu): Find generic hyperplane in the ambient space
-    n_tries = 100
+    # set seed for PRNG to ensure reproducibility
+    if deterministic:
+        set_random_seed(27)
+
+    # "Shelling order" on the vertices (idea by Fleming-Karu): Find generic hyperplane in the ambient space
+    n_tries = 150
     for i in range(n_tries):
         # generate random linear form on QQ^{P.dim()}
         w = vector([QQ.random_element() for _ in range(P.dim())])
@@ -175,6 +194,8 @@ def get_basis_functions(P, deg=None, return_order=False):
     
     # sort vertices in ascending order based on their value at f 
     shelling_order_idcs = sorted(list(range(P.n_vertices())), key=lambda i: seen_values[i])
+    # inverse permutation
+    inverse_shelling_order = [shelling_order_idcs.index(i) for i in range(P.n_vertices())]
 
     # get ordered normal fan of P
     normal_fan = ordered_normal_fan(P)
@@ -183,8 +204,8 @@ def get_basis_functions(P, deg=None, return_order=False):
     M = Matrix.zero(normal_fan.nrays(), normal_fan.ngenerating_cones())
     for i, rho in enumerate(normal_fan.cones(1)):
         for idx in rho.star_generator_indices():
-            M[i, idx] = 1
-    # M[i, j] = 1 means the characteristic function of ray i is supported on the maximal cone j
+            M[i, inverse_shelling_order[idx]] = 1
+    # M[i, j] = 1 means the characteristic function of ray i is supported on the j-th (wrt the shelling order) maximal cone
 
     basis_functions = []
     for i in range(normal_fan.ngenerating_cones()):
@@ -213,10 +234,11 @@ def get_basis_functions(P, deg=None, return_order=False):
                     break
             if success:
                 break
-    
-    # Order basis functions by degree
-    basis_functions = sorted(basis_functions, key=lambda x: x[1])
-    basis_functions = list(map(lambda x: x[0], basis_functions))
+
+    if deg is not None:
+        basis_functions = [x[0] for x in basis_functions if x[1] == deg]
+    else:
+        basis_functions = list(map(lambda x: x[0], basis_functions))
 
     if return_order:
         return basis_functions, shelling_order_idcs
@@ -224,7 +246,7 @@ def get_basis_functions(P, deg=None, return_order=False):
 
 def get_evaluation_map(Sigma):
     """
-    Accepts a two-dimensional complete polytopal simplicial fan.
+    Accepts a complete polytopal simplicial fan.
     Returns the evaluation map for the top degree cohomology.
     """
 
@@ -237,7 +259,7 @@ def get_evaluation_map(Sigma):
 
     for sigma in Sigma.cones(Sigma.dim()):
         f_sigma = 1
-        M = Matrix.zero(Sigma.dim(), Sigma.dim())
+        M = Matrix.zero(QQ, Sigma.dim(), Sigma.dim())
         for i, r in enumerate(sigma.faces(1)):
             f_i = get_characteristic_function_of_ray(r, Sigma, restrict_to=sigma)
             f_sigma *= f_i
@@ -264,7 +286,7 @@ def compute_poincare_pairing(Sigma):
     # define evaluation map on H^2
     evaluation_map = get_evaluation_map(Sigma)
 
-    # compute pairing
+    # compute pairing   
     size = len(basis_functions)
     M = np.zeros((size, size))
     for i in range(size):
@@ -325,12 +347,15 @@ def Simplex(n):
         vertices.append(tuple(e_i))
     return Polyhedron(vertices)
 
-def ordered_normal_fan(P):
+def ordered_normal_fan(P, order=None):
     """
     Accepts a lattice polytope P.
-    Returns the normal fan of P, constructed in a way such that the bijection
+    Returns the normal fan of P.
+    If order == None, the normal fan is constructed in a way such that the bijection
         {vertices of P} <-> {maximal cones of the normal fan of P}
         is index-preserving.
+    Else if order is a permutation of the indices of maximal cones of the normal fan,
+        the maximal cones are ordered in that way.
     """
 
     # instead of invoking P.normal_fan(), we build the normal fan from scratch
@@ -345,8 +370,10 @@ def ordered_normal_fan(P):
 
     # Create ordered list of rays of the normal fan
     for facet in P.facets():
-        vertices_in_facet = list(facet.vertex_generator())
-        common_hypersurface = [ieq for ieq in halfspaces if all([ieq in v.incident() for v in vertices_in_facet])][0]
+        vertices_in_facet = list(facet.vertices())
+        common_hypersurface = [ieq for ieq in halfspaces if all([ieq in v.incident() for v in vertices_in_facet])]
+        #common_hypersurface = [ieq for ieq in facet.ambient_Hrepresentation() if isinstance(ieq, sage.geometry.polyhedron.representation.Inequality)]
+        common_hypersurface = common_hypersurface[0]
         rays.append(common_hypersurface.vector()[1:])
     
     # Create list of cones
@@ -357,20 +384,53 @@ def ordered_normal_fan(P):
             rays_of_v.append(rays.index(ray))
         cones.append(rays_of_v)
 
+    if order is not None:
+        cones = [cones[i] for i in order]
+
     # build the normal fan
     return Fan(rays=rays, cones=cones)
 
-def get_support_function_from_polytope(P):
+def squash(P, F):
     """
-    Accepts a simplicial lattice polytope P.
+    Accepts a polytope P and a facet F.
+    Returns 
+        - a polytope which is the projection of F into a vector space of relative dimension -1
+        - the normal fan of this polytope, obtained from the normal fan of P by squashing the facet normal on F
+    """
+
+    rho_F = -F.normal_cone().rays()[0].vector() # Outwards pointing facet normal of F
+        
+    # find an invertible matrix with the ray generator of rho_F in the first column
+    while True:
+        M = matrix.random(QQ, P.dim(), P.dim())
+        M[:, 0] = rho_F
+        if M.det() != 0:
+            break
+    M = M.T.gram_schmidt()[0]
+    projection_matrix = M[1:, :]
+
+    # Realize F as polytope in relative dimension -1
+    new_vertices = [projection_matrix * vector(x) for x in F.vertices()]
+    F_proj = Polyhedron(new_vertices)
+
+    Sigma = ordered_normal_fan(F_proj)
+
+    return F_proj, Sigma, rho_F, projection_matrix
+
+def get_support_function_from_polytope(P, order=None):
+    """
+    Accepts a simple lattice polytope P.
     Returns the normal fan of P together with the convex support function of the ample Cartier divisor defined by P.
     """
 
-    if not P.is_simplicial():
-        raise ValueError("The polytope P must be simplicial.")
+    if not P.is_simple():
+        raise ValueError("The polytope P must be simple.")
+
+    # get the vertices
+    vertices = P.Vrepresentation()
 
     # get the normal fan
-    normal_fan = ordered_normal_fan(P)
+    normal_fan = ordered_normal_fan(P, order=order)
     R = PolynomialRing(QQ, "x", normal_fan.dim())
 
     # construct the support function
@@ -389,35 +449,187 @@ def get_support_function_from_polytope(P):
 
     return normal_fan, phi
 
-def compute_lefschetz_determinant(P):
+def compute_lefschetz_determinant(P, k=0):
     """
-    Accepts a (two-dimensional) simple lattice polytope P.
-    Returns the determinant of the Lefschetz operator associated to the natural ample line bundle on the
-    toric variety associated to P.
+    Accepts a simple lattice polytope P.
+    Returns the determinant of the Lefschetz operator from H^k to H^{n-k} given by the
+        strictly convex support function of P.
     """
 
     normal_fan, phi = get_support_function_from_polytope(P)
     ev = get_evaluation_map(normal_fan)
+    basis_functions = get_basis_functions(P, deg=k)
+    # initialize Lefschetz operator in degree k
+    n = P.dim()
+    L = ConewisePolynomial.ones(normal_fan)
+    for i in range(n-2*k):
+        L *= phi
+    # L = phi^{n-k}
+    M = matrix.zero(QQ, len(basis_functions), len(basis_functions))
+    for i, f_1 in enumerate(basis_functions):
+        for j, f_2 in enumerate(basis_functions):
+            x = ev(f_1 * L * f_2)
+            M[i, j] = x(*[0]*P.dim())
 
-    det = ev(phi*phi)
-    return det
+    return M.det()
 
-def random_lattice_polytope(n_vertices, dim):
+def random_lattice_polytope(n_vertices, dim, simple=False):
     """
     Accepts a nonnegative integer n_vertices and a nonnegative integer dim.
     Returns a random lattice polytope in dimension dim which is the convex hull of n_vertices vertices
         (V-representation need not be minimal)
+    If simple=True, returns a simple polytope.
     """
 
     # initialize lattice
     M = matrix.identity(dim)
     L = IntegralLattice(M)
 
-    # get n_vertices random elements of the lattics
-    vertices = [L.random_element() for i in range(n_vertices)]
+    while True:
+        # get n_vertices random elements of the lattics
+        vertices = [L.random_element() for i in range(n_vertices)]
+        P = Polyhedron(vertices)
+        if P.is_simple():
+            return P
 
-    return Polyhedron(vertices)
-
-def express_as_linear_combination(P, f):
-    """Accepts"""
+def random_lattice_polytope_from_halfspaces(dim, n_halfspaces):
+    """
+    Accepts a nonnegative integer dim and a nonnegative integer n_halfspaces.
+    Returns a simple polytope in dimension dim which is constructed by sampling n_halfspaces random halfspaces.
+    """
     
+    while True:
+        halfspaces = []
+        for i in range(n_halfspaces):
+            h = [ZZ.random_element() for _ in range(dim+1)]
+            halfspaces.append(h)
+        P = Polyhedron(ieqs = halfspaces)
+        if P.is_compact() and P.is_simple() and not P.is_empty():
+            break
+    
+    #scale up vertices such that they become lattice points
+    vertex_denominators = [v.vector().denominator() for v in P.Vrepresentation()]
+    total_lcm = lcm(vertex_denominators)
+    return P * total_lcm
+
+def express_as_linear_combination(P, f, verbose=False):
+    """
+    Accepts a polytope P and a conewise polynomial f on the normal fan of P.
+    Returns the structure constants for the linear decomposition of f into basis elements
+        of the equivariant(!) cohomology ring.
+    """
+
+    # TODO: Implement ConewisePolynomial.data as dict, not list. Makes indexing much easier.
+    g = f
+    structure_constants = []
+    basis_functions, shelling_order = get_basis_functions(P, return_order=True)
+    normal_fan = ordered_normal_fan(P)
+    for i, cone_idx in enumerate(shelling_order):
+        a = g[cone_idx] / basis_functions[i][cone_idx]
+        a = a.numerator() # even though this is always a polynomial, sage will treat it as a fraction field element
+        structure_constants.append(a)
+        g -= a*basis_functions[cone_idx]
+    
+    if verbose:
+        print("ordering of the maximal cones:")
+        for idx in shelling_order:
+            c = normal_fan.generating_cones()[idx]
+            print(list(c.rays()))
+            print("---------")
+
+        print("basis functions:")
+        print(basis_functions)
+
+        print("structure constants:")
+        print(structure_constants)
+        return
+
+    return structure_constants
+
+def compute_all_lefschetz_determinants(P, log=False, outfile=None):
+    if outfile is not None: 
+        f = open(outfile, "a")
+    if P.volume() == 0:
+        summary_str = "P has volume 0, skipping"
+    else:
+        summary_str = f"P is a polytope of dimension {P.dim()} with volume {P.volume()}. Prime factors of the volume are {[x[0] for x in factor(P.volume()) if x[1] > 0]}"
+
+    if outfile is None:
+        print(summary_str)
+    else:
+        f.write(summary_str + "\n")
+
+    if log:
+        if outfile is None:
+            print(P.Vrepresentation())
+        else:
+            f.write(repr(P.Vrepresentation()))
+            f.write("\n")
+
+    if P.volume() == 0:
+        if outfile is None:
+            return
+        f.write("-----------------------\n")
+        return
+
+    for k in range((P.dim() + 1) // 2):
+        det = compute_lefschetz_determinant(P, k)
+        prime_factors = [x[0] for x in det.factor()]
+        expected_bad_primes = [x[0] for x in factor(factorial(P.dim()))] + [x[0] for x in factor(P.volume()) if x[1] > 0]
+        max_prime_divisor_of_volume = max(factor(P.volume()))[0]
+        if any([x > max_prime_divisor_of_volume for x in prime_factors]):
+            if outfile is None:
+                print("Bad prime bigger than biggest prime in volume")
+            else:
+                f.write("Bad prime bigger than biggest prime in volume")
+        if any([x not in expected_bad_primes for x in prime_factors]):
+            if outfile is None:
+                print("BAD PRIME FOUND")
+            else:
+                f.write("BAD PRIME FOUND!\n")
+        det_factor_summary = f"k = {k}: {det}. Prime factors: {det.factor()}."
+        if outfile is None:
+            print(det_factor_summary)
+        else:
+            f.write(det_factor_summary + "\n")
+    
+    if outfile is not None:
+        f.write("--------------------------------\n")
+        f.close()
+
+def test_squash():
+    P = random_lattice_polytope_from_halfspaces(4, 5)
+    Sigma_P = ordered_normal_fan(P)
+    F = P.faces(3)[0]
+
+    F_downstairs, Sigma_F, rho_F, projection_matrix = squash(P, F)
+    rho_F = [x for x in Sigma_P.cones(1) if x.rays()[0] == rho_F][0]
+    chi_F = get_characteristic_function_of_ray(rho_F, Sigma_P)
+
+    # build correspondence between maximal cones of Sigma_F and Sigma_P
+    corr = []
+    for v in F_downstairs.vertices():
+        for idx_w, w in enumerate(P.vertices()):
+            if projection_matrix * vector(w) == vector(v):
+                corr.append(idx_w)
+
+    ev_upstairs = get_evaluation_map(Sigma_P)
+    ev_downstairs = get_evaluation_map(Sigma_F)
+
+    phi_F = get_support_function_from_polytope(F_downstairs)[1]
+    
+    # build conewise polynomial g := \chi_{\rho_F} \cdot \pi_F^* \phi_F on Sigma_P
+    data_upstairs = []
+    for idx, v in enumerate(P.vertices()):
+        if idx not in corr:
+            data_upstairs.append(0) # support of g is the star of \rho_F
+        else:
+            # f_downstairs is the polynomial which defines phi_F on the cone of Sigma_F
+            # to which the maximal cone of Sigma_P with index idx maps.
+            idx_downstairs = corr.index(idx)
+            print(idx_downstairs)
+            f_downstairs = phi_F[idx_downstairs]
+            data_upstairs.append(projection_matrix.act_on_polynomial(f_downstairs) * chi_F[idx_downstairs])
+    pi_star_phi = ConewisePolynomial(Sigma_P, data_upstairs)
+
+    return pi_star_phi
